@@ -1,6 +1,6 @@
 {
   "name": "dsh-split-panels",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Horizontal-only multi-session panes for the DSH web conversation area — the sidebar and header stay single, each pane has only a close button.",
   "type": "module",
   "private": true,

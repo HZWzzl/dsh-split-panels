@@ -73,7 +73,7 @@ window.__ModuleLoader__.load({
     // ---------------------------------------------------------------------
 
     const PLUGIN_ID = "dsh-split-panels";
-    const PLUGIN_VERSION = "0.3.0";
+    const PLUGIN_VERSION = "0.3.1";
 
     /** Split panes are a desktop-only affordance. Phones (and narrow touch
         viewports) keep the stock single-conversation UI: the plugin stays
@@ -271,10 +271,10 @@ window.__ModuleLoader__.load({
       display: flex; flex-direction: column;
       color: var(--dsw-alias-label-primary);
       font-family: var(--dsw-font-family, system-ui, sans-serif);
-      /* mirrors the stock ConversationRoot values so panes render the
-         composer card and transcript at the same 748px content width
-         (CSS has no // comments — a // line here used to swallow this
-         declaration and uncapped every composer card in split view) */
+      /* Fallback width for chrome-only renderers. Real panes override both
+         variables from their measured width (see PaneFrame's paneStyle), so a
+         single wide pane fills the whole conversation column instead of
+         inheriting the stock 748px reading width with blank sides. */
       --dsh-chat-content-width: 748px;
       --dsh-composer-card-max-width: calc(var(--dsh-chat-content-width) + 32px);
       --dsh-composer-side-clearance: 16px;
@@ -6781,8 +6781,22 @@ window.__ModuleLoader__.load({
         "--dsv-composer-font-size": cardFont.fontSize,
         "--dsv-composer-line-height": cardFont.lineHeight,
       } : undefined);
-      const paneStyle = paneColor === undefined ? basePaneStyle
-        : Object.assign({}, basePaneStyle, { "--dsv-pane-color": paneColor });
+      const paneStyle: Record<string, string> = Object.assign({}, basePaneStyle);
+      if (paneColor !== undefined) paneStyle["--dsv-pane-color"] = paneColor;
+      // The re-hosted stock chat view reads the reading width from these two
+      // variables (ConversationRoot normally publishes them; panes have no
+      // ConversationRoot). Feed the pane's own width so transcript + composer
+      // fill the pane: the scroll area keeps its 16px side padding, hence
+      // width-32 for the text column and full width for the composer card.
+      if (paneSize.w > 0) {
+        paneStyle["--dsh-chat-content-width"] = (paneSize.w - 32) + "px";
+        // The stock chat view recomputes the reading width from the user-width
+        // preference when its conversation-body wrapper is present, so feed
+        // that preference too; otherwise a wide pane would fall back to the
+        // stock clamp (max 920px) and leave blank sides again.
+        paneStyle["--dsh-chat-user-width"] = (paneSize.w - 32) + "px";
+        paneStyle["--dsh-composer-card-max-width"] = paneSize.w + "px";
+      }
 
       return h(
         "div",
