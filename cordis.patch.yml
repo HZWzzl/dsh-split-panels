@@ -1,0 +1,5 @@
+# dsh-split-panels bundle patch: mounts the horizontal split panes into any
+# DSH web profile that lists this package in `dsh.profile.bundles`.
+- insert:
+    - id: split-panels
+      name: 'dsh-split-panels'
