@@ -1,6 +1,6 @@
 {
   "name": "dsh-split-panels",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Horizontal-only multi-session panes for the DSH web conversation area — the sidebar and header stay single, each pane has only a close button.",
   "type": "module",
   "private": true,
@@ -31,10 +31,10 @@
     }
   },
   "peerDependencies": {
-    "react": "^18.0.0",
     "@deepseek-ai/dsh-client-locale": "*",
+    "@deepseek-ai/dsh-client-ui-layout": "*",
     "@deepseek-ai/dsh-client-ui-primitives": "*",
-    "@deepseek-ai/dsh-client-ui-layout": "*"
+    "react": "^18.0.0"
   },
   "peerDependenciesMeta": {
     "react": {
@@ -50,5 +50,13 @@
       "optional": true
     }
   },
-  "license": "MIT"
+  "license": "MIT",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
 }

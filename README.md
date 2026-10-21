@@ -17,6 +17,30 @@ DSH Web 对话区横向分屏插件。侧栏、顶栏永远只有一份，只有
 - 中间显示插件页、设置等非会话内容时自动隐藏分屏，弹窗/模态在分屏之上。
 - 布局持久化在 localStorage。
 
+## 项目结构
+
+```
+src/client.ts        # 客户端全部逻辑（module-loader 经典脚本，非 ESM）
+src/index.ts         # host 端空实现（Cordis 入口）
+src/types.d.ts       # 领域类型（SplitTree / SessionColorMap / HealthSummary…）
+src/globals.d.ts     # window.__ModuleLoader__ / __DSH_BOOT__ / __dshSplitPanels 声明
+lib/client.js        # 构建产物（提交进仓库，link 部署直接加载）
+lib/index.js
+tsconfig.json        # typecheck（strict:false，逐步收紧）
+tsconfig.build.json  # 构建配置
+```
+
+## 开发
+
+```sh
+pnpm add -D typescript   # 首次；本机 pnpm 根目录有 workspace，装到本目录
+pnpm typecheck           # tsc --noEmit
+pnpm build               # src/*.ts → lib/*.js（tsc，保留注释）
+```
+
+修改 `src/` 后执行 `pnpm build`，DSH 的 HMR 会捡到新的 `lib/client.js`；页面仍需刷新一次加载新 bundle。
+`lib/` 已提交，不跑构建也能直接 link 部署当前版本。
+
 ## 安装
 
 ```sh
