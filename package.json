@@ -1,9 +1,9 @@
 {
   "name": "dsh-split-panels",
-  "version": "0.3.2",
-  "description": "Horizontal-only multi-session panes for the DSH web conversation area — the sidebar and header stay single, each pane has only a close button.",
+  "version": "2026.10.22-1",
+  "private": false,
+  "description": "DSH Web 对话区横向分屏插件：1–3 个会话栏并列，顶部保留原生状态条，侧栏与顶栏始终只有一份。",
   "type": "module",
-  "private": true,
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
@@ -15,7 +15,8 @@
     "lib/client.js",
     "cordis.patch.yml",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "dsh": {
     "bundle": {
@@ -29,6 +30,10 @@
         "@deepseek-ai/dsh-client-ui-primitives"
       ]
     }
+  },
+  "engines": {
+    "node": ">=22.19",
+    "dsh": ">=0.2.0-rc.2 <0.3.0"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-client-locale": "*",
@@ -50,13 +55,36 @@
       "optional": true
     }
   },
-  "license": "MIT",
+  "license": "GPL-3.0-only",
+  "author": "HZWzzl",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HZWzzl/dsh-split-panels.git"
+  },
+  "homepage": "https://github.com/HZWzzl/dsh-split-panels",
+  "bugs": {
+    "url": "https://github.com/HZWzzl/dsh-split-panels/issues"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "split-panel",
+    "split-screen",
+    "multi-session",
+    "tmux"
+  ],
+  "packageManager": "pnpm@11.9.0",
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json",
-    "check": "tsc -p tsconfig.json"
+    "check": "pnpm typecheck && pnpm build && git diff --exit-code -- lib/",
+    "version:set": "node scripts/set-version.mjs",
+    "version:check": "node scripts/set-version.mjs --check",
+    "prepack": "pnpm build"
   },
   "devDependencies": {
+    "@deepseek-ai/dsh": "0.2.1-rc.2",
     "typescript": "^5.9.3"
   }
 }
