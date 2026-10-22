@@ -45,11 +45,12 @@ jobs:
         if: steps.plan.outputs.publish == 'true'
         with:
           node-version: 22
+          cache: pnpm
 
       - name: Verify and package the exact release candidate
         if: steps.plan.outputs.publish == 'true'
         run: |
-          pnpm install
+          pnpm install --frozen-lockfile
           pnpm version:check
           pnpm typecheck
           # lib/ is shipped inside the tarball; it must match src/.
