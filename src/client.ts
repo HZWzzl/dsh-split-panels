@@ -2330,6 +2330,23 @@ window.__ModuleLoader__.load({
       return paneRetainFailures.get(sessionId);
     }
 
+    /** Whether a retained SessionReference is still usable. The host rejects
+        `ready` and clears `record` on release; touching `binding` is the
+        authoritative probe (it throws "… is released" when dead). */
+    function referenceIsLive(reference) {
+      if (reference === null || reference === undefined) return false;
+      try {
+        const released = reference.released;
+        const signal = released !== undefined && released !== null ? released.signal : null;
+        if (signal !== null && signal !== undefined && signal.aborted === true) return false;
+        if (reference.record === undefined) return false;
+        void reference.binding;
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
     /** Retain `sessionId` for this plugin (0.2.0 path only). A transient
         failure is NOT swallowed: it is recorded (with the exact message) so the
         retry driver below can report/backoff, and the caller can tell "not yet"
@@ -2344,7 +2361,13 @@ window.__ModuleLoader__.load({
         return undefined;
       }
       const cached = paneSessionReferences.get(sessionId);
-      if (cached !== undefined) return cached;
+      if (cached !== undefined) {
+        if (referenceIsLive(cached)) return cached;
+        // The host released the reference underneath this pane (session opened
+        // by another view/generation swap). Drop it and retain a fresh one so
+        // the pane can keep streaming instead of reading a dead binding.
+        paneSessionReferences.delete(sessionId);
+      }
       try {
         const reference = sessionsService.retain(sessionId, { source: "splitView" });
         if (reference === undefined || reference === null) {
@@ -2792,12 +2815,14 @@ window.__ModuleLoader__.load({
           schedule();
           return;
         }
+        let hasSession = false;
+        try { hasSession = reference.binding !== undefined && reference.binding !== null; } catch { hasSession = false; }
         notePaneFace(sessionId, {
           path: "retained",
           attempts: record.attempts,
           lastRetainError: null,
           reference: true,
-          hasSession: reference.binding !== undefined && reference.binding !== null,
+          hasSession,
         });
         if (bindNow()) return;
         // Reference obtained but its binding has not materialized yet: retry on
@@ -2816,6 +2841,7 @@ window.__ModuleLoader__.load({
       };
       record.start = () => {
         if (record.face !== undefined) {
+          revalidate();
           publish({ face: record.face, loading: false, exhausted: false, lastError: null });
           return;
         }
@@ -2837,9 +2863,52 @@ window.__ModuleLoader__.load({
           attempt();
         }, 0);
       };
+      /** Revalidate a live face: the host may release the pane's reference or
+          replace the session generation underneath a mounted pane (including a
+          stock sidebar re-open of the same session). A stale face silently
+          stops receiving events — the pane then shows the latest messages
+          frozen/missing and new turns never appear until a reload. */
+      const revalidate = () => {
+        if (record.cancelled || record.face === undefined) return;
+        const reference = paneSessionReferences.get(sessionId);
+        if (!referenceIsLive(reference)) {
+          // Reference released underneath us: drop the stale generation and
+          // re-run the bounded retain driver.
+          record.face = undefined;
+          record.attempts = 0;
+          record.exhausted = false;
+          record.warned = false;
+          paneSessionReferences.delete(sessionId);
+          publish({ face: undefined, loading: true, exhausted: false, attempts: 0, lastError: null });
+          attempt();
+          return;
+        }
+        // A generation swap replaces the binding while the reference stays
+        // retained: adopt the live face so streaming resumes.
+        let next = undefined;
+        try {
+          if (sessionsService !== undefined && sessionsService !== null && typeof sessionsService.binding === "function") {
+            const binding = sessionsService.binding(sessionId);
+            next = binding !== undefined && binding !== null ? binding.session : undefined;
+          }
+        } catch { next = undefined; }
+        if (next !== undefined && next !== null && next !== record.face) {
+          record.face = next;
+          notePaneFace(sessionId, {
+            path: "rebound",
+            attempts: record.attempts,
+            lastRetainError: null,
+            reference: true,
+            hasSession: true,
+          });
+          publish({ face: next, loading: false, exhausted: false, attempts: record.attempts, lastError: null });
+        }
+      };
       record.nudge = () => {
-        if (record.cancelled || record.face !== undefined || record.timer !== 0) return;
+        if (record.cancelled) return;
         if (record.listeners.size === 0) return;
+        if (record.face !== undefined) { revalidate(); return; }
+        if (record.timer !== 0) return;
         if (record.exhausted === true) return; // settled; wait for a remount
         attempt();
       };
@@ -2896,9 +2965,16 @@ window.__ModuleLoader__.load({
     function useSessionFace(sessionId) {
       const status = useSessionFaceStatus(sessionId);
       const listSnapshot = useSessionsList();
+      const resolver = sessionFaceResolver(sessionId);
       React.useEffect(() => {
-        if (listSnapshot !== null && listSnapshot !== undefined) sessionFaceResolver(sessionId).nudge();
-      }, [listSnapshot, sessionId]);
+        if (listSnapshot !== null && listSnapshot !== undefined) resolver.nudge();
+      }, [listSnapshot, sessionId, resolver]);
+      // Cheap safety net for a host that replaces the generation without any
+      // sessions-list update: revalidate the mounted face on a slow interval.
+      React.useEffect(() => {
+        const timer = window.setInterval(() => { try { resolver.nudge(); } catch {} }, 3000);
+        return () => { try { window.clearInterval(timer); } catch {} };
+      }, [resolver]);
       return status.face;
     }
 
@@ -8390,7 +8466,14 @@ window.__ModuleLoader__.load({
           const id = key.slice("session:".length);
           if (id === "" || !isValidSessionId(id)) return;
           if (findLeafNode(treeStore.getSnapshot().root, id) !== null) {
+            // Already open in a pane: only focus it. Letting the stock sidebar
+            // run its own openSession on the same session re-opens the session
+            // underneath the panes and drops the pane's live view generation
+            // (the "re-click clears the latest messages" bug). Keep the stock
+            // click from running at all.
             treeStore.setFocus(id);
+            event.preventDefault();
+            event.stopPropagation();
             return;
           }
           if (!paneKitTrustworthy(id)) warnPaneKitUnavailable(id);
