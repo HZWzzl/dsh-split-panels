@@ -81,12 +81,12 @@ flowchart LR
 
 ### 从 Release 安装（推荐）
 
-1. 到 [Releases](https://github.com/HZWzzl/dsh-split-panels/releases/latest) 下载 `dsh-split-panels-<version>.tgz` 与 `SHA256SUMS`。
+1. 到 [Releases](https://github.com/HZWzzl/dsh-split-panels/releases/latest) 下载 `dsh-split-panels-<YYYY.MM.DD-N>.tgz` 与 `SHA256SUMS`（tag 为 `v<YYYYMMDD-N>`，例如 `v20261022-1` ↔ `2026.10.22-1`）。
 2. 校验并安装：
 
 ```sh
 sha256sum -c SHA256SUMS --ignore-missing
-dsh plugin --profile web add ./dsh-split-panels-<version>.tgz
+dsh plugin --profile web add ./dsh-split-panels-<YYYY.MM.DD-N>.tgz
 ```
 
 3. 重启 `dsh web`，刷新页面。插件会自动加入 profile 的 `dsh.profile.bundles`。

@@ -1,0 +1,4 @@
+# Keep patches and JSON/YAML stable across Windows/macOS/Linux checkouts.
+* text=auto eol=lf
+*.tgz binary
+*.png binary

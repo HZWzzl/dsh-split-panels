@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  schedule:
+    # 08:00 Asia/Shanghai (UTC+08:00) every day.
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只验证与打包，不创建 tag / release'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Plan release (date counter, skip when nothing changed)
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq 'add // []' > "$RUNNER_TEMP/releases.json"
+          node scripts/plan-release.mjs --releases "$RUNNER_TEMP/releases.json"
+
+      - uses: pnpm/action-setup@v6
+        if: steps.plan.outputs.publish == 'true'
+      - uses: actions/setup-node@v7
+        if: steps.plan.outputs.publish == 'true'
+        with:
+          node-version: 22
+
+      - name: Verify and package the exact release candidate
+        if: steps.plan.outputs.publish == 'true'
+        run: |
+          pnpm install
+          pnpm version:check
+          pnpm typecheck
+          # lib/ is shipped inside the tarball; it must match src/.
+          git diff --exit-code -- lib/
+          node scripts/set-version.mjs "${{ steps.plan.outputs.package_version }}"
+          # Rebuild lib/client.js with the stamped PLUGIN_VERSION so health()
+          # reports the release; the release commit carries the new build.
+          pnpm build
+          mkdir -p release
+          pnpm pack --pack-destination release
+          cd release && sha256sum ./*.tgz > SHA256SUMS
+
+      - name: Stamp a release-only commit
+        if: steps.plan.outputs.publish == 'true'
+        run: |
+          source_commit="$(git rev-parse HEAD)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add package.json src/client.ts lib
+          git -c core.hooksPath=/dev/null commit --allow-empty -m "chore(release): ${{ steps.plan.outputs.tag }}" -m "Source-Commit: $source_commit"
+          echo "RELEASE_SOURCE_COMMIT=$source_commit" >> "$GITHUB_ENV"
+
+      - name: Publish immutable release
+        if: steps.plan.outputs.publish == 'true' && inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          cd release
+          sha256sum --check SHA256SUMS
+          # Tag the version-stamped commit; never push it to main and never
+          # rewrite a published tag.
+          git tag "$RELEASE_TAG"
+          git push origin "refs/tags/$RELEASE_TAG"
+          gh release create "$RELEASE_TAG" --verify-tag --draft --title "$RELEASE_TAG" --generate-notes \
+            --notes "安装：下载 dsh-split-panels-${{ steps.plan.outputs.package_version }}.tgz 与 SHA256SUMS，先 sha256sum --check SHA256SUMS，再执行 dsh plugin --profile web add ./dsh-split-panels-${{ steps.plan.outputs.package_version }}.tgz。Built from main commit $RELEASE_SOURCE_COMMIT."
+          gh release upload "$RELEASE_TAG" ./*.tgz SHA256SUMS
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --latest
+
+      - name: Summarize dry run
+        if: steps.plan.outputs.publish == 'true' && inputs.dry_run == true
+        run: |
+          echo "Dry run passed. No tag or release was created; the counter was not reserved." >> "$GITHUB_STEP_SUMMARY"
+          ls -la release >> "$GITHUB_STEP_SUMMARY"
