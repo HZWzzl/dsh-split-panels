@@ -1,6 +1,6 @@
 {
   "name": "dsh-split-panels",
-  "version": "2026.10.22-1",
+  "version": "2026.10.23-1",
   "private": false,
   "description": "DSH Web 对话区横向分屏插件：1–3 个会话栏并列，顶部保留原生状态条，侧栏与顶栏始终只有一份。",
   "type": "module",
