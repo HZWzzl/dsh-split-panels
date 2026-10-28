@@ -41,15 +41,19 @@ flowchart TD
   A["点击侧栏会话 / New Session"] --> B{"已在 pane 中？"}
   B -- 是 --> C["聚焦该 pane"]
   B -- 否 --> D{"已有 3 个 pane？"}
-  D -- 是 --> E["拒绝并提示先关闭一个"]
+  D -- 是 --> E["拦截新建并提示：关闭一栏后自动重试"]
   D -- 否 --> F["在右侧新开 pane"]
   F --> G["状态条 / 颜色 / 独立输入框"]
+  N["New Session（按钮 / 绑定快捷键）"] --> P["立刻开一栏「新会话」输入区（无需等 Host）"]
+  P --> Q["Host 返回真实会话 id 后原地绑定该栏"]
+  Q --> R["已输入的文字自动带入正式输入框"]
   H["关闭 pane（✕，仅 2 栏以上可用）"] --> I{"还剩 1 栏？"}
   I -- 否 --> J["关闭该栏，保持分屏"]
   I -- 是 --> K["保留最后一栏（不提供关闭）"]
 ```
 
 - **启动即分屏**：打开页面时，当前有历史的会话直接作为 1 个 pane 出现；不再有「原生单会话 ↔ 分屏」两套界面。
+- **新建会话秒开**：点 New Session（stock 为会话新建绑定了 Mod+N 时快捷键同样生效）立刻在右侧出现一栏「新会话」，输入框马上可以打字，不再阻塞等 Host 建好会话；Host 返回真实会话后该栏原地切换成正式会话，未发送的文字自动带入（回车则作为首条消息排队发送）。Host 创建失败/超时会显示重试与关闭。诊断见 `health().pendingNewSessions` / `health().lastNewSessionResolve`。
 - **1–3 栏**：单栏占满正文宽度；第 4 栏会被拒绝。拆分布局记忆在 `localStorage`，刷新后恢复。
 - **最后一栏不可关闭**：✕ 只在两栏及以上出现；关闭最后一栏会退回原生单会话视图，与“正文区始终是 1–3 个 pane”的模型冲突，因此不提供。退出分屏用 `window.__dshSplitPanels.setEnabled(false)`（或 `dsh-session-hotkeys` 的 Alt+W）。
 - **状态条保留**：每栏顶部渲染原生 session header 的状态入口（Agent Team、Standard mode、子代理、后台任务、定时任务、⋯ 更多操作），与原生页同一套组件、同一套交互。
@@ -132,12 +136,12 @@ DSH 处于开发者预览期，客户端 slot / 平台模块表可能变化；�
 | `dsh.split-panels.health.v1` | 崩溃保护记录 |
 
 ```js
-window.__dshSplitPanels.health()            // 版本 / panes / 几何 / lastError
+window.__dshSplitPanels.health()            // 版本 / panes / 几何 / 新建会话诊断 / lastError
 window.__dshSplitPanels.setEnabled(false)   // 关闭分屏
 window.__dshSplitPanels.reset()             // 清除持久化布局
 ```
 
-排障：看不到分屏时先看 `health()` 的 `enabled / safeMode / panes / geometry`；`retry()` 可重新激活。连续崩溃才会进入安全模式，原生界面始终可用。
+排障：看不到分屏时先看 `health()` 的 `enabled / safeMode / panes / geometry`；`retry()` 可重新激活。连续崩溃才会进入安全模式，原生界面始终可用。新建会话慢/卡住时看 `health().pendingNewSessions`（仍在等 Host 返回会话 id 的临时栏数，0 表示没有在等）与 `health().lastNewSessionResolve`（最近一次解析记录：`{sessionId, pendingId, ms, swapped, handedOff, at}`，`ms` 是「点击 → Host 会话就绪」的毫秒数）。
 
 ## 开发
 

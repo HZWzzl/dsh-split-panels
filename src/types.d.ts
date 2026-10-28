@@ -13,6 +13,13 @@
 interface SplitLeaf {
   t: "leaf";
   id: string;
+  /**
+   * A pane opened OPTIMISTICALLY for a New Session click: it renders the
+   * plugin's lightweight pending composer until the host returns the real
+   * session id, which then replaces `id`. Pending leaves are never persisted
+   * (see stripPendingLeaves in client.ts).
+   */
+  pending?: boolean;
 }
 
 /** Split direction: horizontal panes or vertical panes. */
