@@ -226,6 +226,13 @@ window.__ModuleLoader__.load({
       pendingDiscard: "Close pane",
       pendingDraftKept: "The first message could not be auto-sent — it is kept in the composer.",
       limitCloseOne: "Close a pane and retry",
+      // document-preview → PDF export (right-sidebar Markdown preview)
+      pdfExport: "Export PDF",
+      pdfExportTitle: "Export this preview as PDF (choose “Save as PDF” in the print dialog)",
+      pdfExportBusy: "Preparing the PDF…",
+      pdfExportHint: "Choose “Save as PDF” in the print dialog to keep the file. Turn off “Headers and footers” for a page that matches the preview.",
+      pdfExportNoPreview: "The Markdown preview is not ready yet.",
+      pdfExportFailed: "Could not prepare the PDF: {detail}",
     };
     const ZH = {
       label: "分屏视图",
@@ -293,6 +300,13 @@ window.__ModuleLoader__.load({
       pendingDiscard: "关闭面板",
       pendingDraftKept: "首条消息未能自动发送 — 已保留在输入框。",
       limitCloseOne: "关闭一栏并新建",
+      // 文档预览 → 导出 PDF（右侧栏 Markdown 预览）
+      pdfExport: "导出 PDF",
+      pdfExportTitle: "把当前预览导出为 PDF（在打印对话框里选「另存为 PDF」）",
+      pdfExportBusy: "正在准备 PDF…",
+      pdfExportHint: "在打印对话框中选择「另存为 PDF」即可保存文件；想要与预览完全一致的版面，请关闭「页眉和页脚」。",
+      pdfExportNoPreview: "Markdown 预览尚未就绪。",
+      pdfExportFailed: "准备 PDF 失败：{detail}",
     };
 
     /** Fallback translator: every locale wrapper unwraps back to this. */
@@ -1003,10 +1017,10 @@ window.__ModuleLoader__.load({
     }
     `;
 
-    function insertStyle(css) {
+    function insertStyle(css, key: string = "split-view") {
       const tag = document.createElement("style");
       tag.dataset.plugin = PLUGIN_ID;
-      tag.dataset.pluginCss = "split-view";
+      tag.dataset.pluginCss = key;
       tag.textContent = css;
       document.head.appendChild(tag);
       return () => {
@@ -10308,6 +10322,594 @@ window.__ModuleLoader__.load({
     }
 
     // ---------------------------------------------------------------------
+    // document preview → PDF export
+    //
+    // The right-sidebar document preview is a browser-only surface: its DOM
+    // already holds exactly what the reader sees — rendered Markdown, tables,
+    // highlighted code, and the Mermaid / PlantUML diagrams that those plugins
+    // splice in next to their fences. Exporting therefore never renders the
+    // document a second way. It
+    //   1. drives the preview's own "Load more" paging until the whole file is
+    //      on screen (a snapshot of a half-read preview would silently drop
+    //      the tail of files longer than one read page),
+    //   2. waits for every lazy diagram and image to settle,
+    //   3. clones that live DOM into a standalone print document that carries
+    //      the app's stylesheets, theme attributes and font rules, and
+    //   4. hands it to the browser's print pipeline.
+    // "Save as PDF" then keeps text vector and selectable and the diagrams as
+    // real SVG, and CSS paged media decides the page breaks instead of a
+    // bitmap chop. Nothing is uploaded: the snapshot never leaves the browser.
+    // ---------------------------------------------------------------------
+
+    const PDF_EXPORT_ID = "split-panels-pdf-export";
+
+    /** Styles for the preview-header button and the transient status toast. */
+    const PDF_EXPORT_CSS = `
+    .dsp-pdf-export {
+      width: 28px; height: 28px; padding: 6px; flex: none;
+      display: inline-flex; align-items: center; justify-content: center;
+      color: var(--dsw-alias-label-secondary);
+      background: transparent; border: none; border-radius: var(--dsw-radius-sm);
+      cursor: pointer; line-height: 1;
+    }
+    .dsp-pdf-export svg { width: 15px; height: 15px; }
+    .dsp-pdf-export:hover:not(:disabled) {
+      color: var(--dsw-alias-label-primary);
+      background: var(--dsw-alias-interactive-bg-hover);
+    }
+    .dsp-pdf-export:disabled { cursor: default; opacity: .55; }
+    .dsp-pdf-export[aria-busy="true"] { animation: dsp-pdf-pulse 1.2s ease-in-out infinite; }
+    .dsp-pdf-toast {
+      position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+      z-index: 2147483000; max-width: min(560px, calc(100vw - 32px));
+      padding: 10px 14px; border-radius: 10px;
+      border: .5px solid var(--dsw-alias-border-l2);
+      background: var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-base, #fff));
+      color: var(--dsw-alias-label-primary);
+      font: 13px/1.5 var(--dsw-font-family, system-ui, sans-serif);
+      box-shadow: 0 8px 28px rgba(0, 0, 0, .18);
+      pointer-events: none; white-space: pre-wrap;
+    }
+    .dsp-pdf-toast[data-tone="error"] { color: var(--dsw-alias-state-error-primary, #d33); }
+    @keyframes dsp-pdf-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+    @media (prefers-reduced-motion: reduce) { .dsp-pdf-export[aria-busy="true"] { animation: none; } }
+    `;
+
+    /** Print-only rules merged into the standalone snapshot. The two
+        placeholders receive the page's own computed colors, so a dark-theme
+        preview prints as the dark page the reader saw instead of a white box
+        with dark-theme text. */
+    const PDF_PRINT_CSS = `
+    @page { size: A4; margin: 14mm 13mm 16mm; }
+    html, body {
+      margin: 0 !important; padding: 0 !important;
+      height: auto !important; min-height: 0 !important; overflow: visible !important;
+    }
+    body {
+      background: __DSP_BODY_BG__ !important;
+      color: __DSP_BODY_FG__ !important;
+      -webkit-print-color-adjust: exact !important;
+      print-color-adjust: exact !important;
+    }
+    [data-dsp-print-content] { display: block; margin: 0; padding: 0; }
+    [data-dsp-print-content] > :first-child { padding: 0 !important; }
+    [data-dsp-print-content] .dsp-print-relax { overflow: visible !important; max-height: none !important; }
+    [data-dsp-print-content] pre,
+    [data-dsp-print-content] pre code {
+      white-space: pre-wrap !important;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    [data-dsp-print-content] pre { overflow: visible !important; }
+    [data-dsp-print-content] table { max-width: 100%; }
+    [data-dsp-print-content] th,
+    [data-dsp-print-content] td { overflow-wrap: anywhere; }
+    /* The pane scrolls tables that are wider than it; on paper a scrollport
+       would clip their right-hand columns. Wide tables get a fixed layout so
+       every column reaches the page and long cells wrap instead of being cut. */
+    [data-dsp-print-content] .md-table-wide table {
+      width: 100% !important; max-width: 100% !important; table-layout: fixed !important;
+    }
+    [data-dsp-print-content] .md-table-wide { font-size: 11px !important; }
+    [data-dsp-print-content] .md-table-wide th,
+    [data-dsp-print-content] .md-table-wide td {
+      white-space: normal !important; overflow-wrap: anywhere; word-break: break-word;
+      padding: 4px 6px !important;
+    }
+    [data-dsp-print-content] img { max-width: 100% !important; }
+    [data-dsp-print-content] .dsh-mmd-body,
+    [data-dsp-print-content] .dsh-plantuml-body { overflow: visible !important; }
+    [data-dsp-print-content] .dsh-mmd-pane svg,
+    [data-dsp-print-content] .dsh-plantuml-canvas svg {
+      max-width: 100% !important; height: auto !important;
+    }
+    [data-dsp-print-content] .dsh-mmd,
+    [data-dsp-print-content] .dsh-plantuml-block,
+    [data-dsp-print-content] .md-code-block,
+    [data-dsp-print-content] table,
+    [data-dsp-print-content] pre,
+    [data-dsp-print-content] blockquote,
+    [data-dsp-print-content] figure,
+    [data-dsp-print-content] img { break-inside: avoid; }
+    [data-dsp-print-content] h1,
+    [data-dsp-print-content] h2,
+    [data-dsp-print-content] h3,
+    [data-dsp-print-content] h4,
+    [data-dsp-print-content] h5 { break-after: avoid; }
+    [data-dsp-print-content] button,
+    [data-dsp-print-content] .dsh-mmd-bar,
+    [data-dsp-print-content] .dsh-plantuml-head,
+    [data-dsp-print-content] [data-code-block-banner] { display: none !important; }
+    `;
+
+    /** A slow export must not be started twice from two quick clicks. */
+    let pdfExportRunning = false;
+    /** The single status toast currently on screen. */
+    let pdfExportToast = null;
+
+    function sleepMs(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    /** Show one transient status message; the previous one is replaced. */
+    function showPdfExportToast(message, tone = undefined) {
+      try {
+        if (pdfExportToast !== null) pdfExportToast.dispose();
+        const element = document.createElement("div");
+        element.className = "dsp-pdf-toast";
+        element.setAttribute("role", "status");
+        element.setAttribute("aria-live", "polite");
+        if (tone !== undefined && tone !== null) element.dataset.tone = String(tone);
+        element.textContent = String(message);
+        document.body.appendChild(element);
+        const timer = setTimeout(() => { try { element.remove(); } catch {} }, tone === "error" ? 9000 : 6000);
+        const toast = {
+          dispose() {
+            clearTimeout(timer);
+            try { element.remove(); } catch {}
+            if (pdfExportToast === toast) pdfExportToast = null;
+          },
+        };
+        pdfExportToast = toast;
+        return toast;
+      } catch {
+        return { dispose() {} };
+      }
+    }
+
+    /** Markdown files the preview renders through the Markdown document body. */
+    function isMarkdownDocumentPath(path) {
+      return typeof path === "string" && /\.(?:md|markdown)$/i.test(path);
+    }
+
+    /** Suggested PDF name: the file's base name without the Markdown suffix. */
+    function pdfExportFileName(path) {
+      let name = typeof path === "string" ? path : "";
+      name = name.slice(Math.max(name.lastIndexOf("/"), name.lastIndexOf("\\")) + 1);
+      name = name.replace(/\.(?:md|markdown)$/i, "").trim();
+      return name !== "" ? name : "document";
+    }
+
+    /** Header buttons belong to the nearest preview container that also owns
+        the Markdown body (header and body are siblings inside it). */
+    function previewContainerOf(node) {
+      let element = node;
+      while (element !== null && element !== undefined && element !== document.body) {
+        if (typeof element.querySelector === "function") {
+          try {
+            if (element.querySelector("[data-document-markdown]") !== null) return element;
+          } catch {}
+        }
+        element = element.parentElement;
+      }
+      return null;
+    }
+
+    /** Fallback lookup used when the header walk finds no container: the
+        visible Markdown root (preview tabs keep only the active body mounted). */
+    function visibleMarkdownRoot() {
+      let roots = [];
+      try { roots = Array.from(document.querySelectorAll("[data-document-markdown]")); } catch { return null; }
+      for (const root of roots) {
+        if (root !== null && root.isConnected && root.getClientRects().length > 0) return root;
+      }
+      return null;
+    }
+
+    /** Drive the preview's own paging until the whole file is rendered. The
+        owner renders a `Load more` control per extra read page (5000 lines by
+        default); it disappears once the file's last line arrived. */
+    async function loadEntirePreview(container) {
+      if (container === null || container === undefined || typeof container.querySelector !== "function") return 0;
+      let clicks = 0;
+      while (clicks < 60) {
+        const button = container.querySelector('button[data-textpreview-more="true"]');
+        if (button === null || button === undefined || button.disabled === true) break;
+        try { button.click(); } catch { break; }
+        clicks += 1;
+        await sleepMs(200);
+      }
+      return clicks;
+    }
+
+    /** Wait until Mermaid / PlantUML surfaces and images have settled. The
+        DOM-quiet window covers the plugins' own debounced render queues; a
+        failed diagram counts as settled because its visible error is exactly
+        what the reader saw. */
+    async function waitForPreviewSettled(root) {
+      if (root === null || root === undefined) return false;
+      const start = Date.now();
+      let quietSince = Date.now();
+      let observer = null;
+      if (typeof MutationObserver === "function") {
+        observer = new MutationObserver(() => { quietSince = Date.now(); });
+        try {
+          observer.observe(root, {
+            childList: true, subtree: true, characterData: true,
+            attributes: true, attributeFilter: ["data-state"],
+          });
+        } catch { observer = null; }
+      }
+      const settledStates = { ok: true, ready: true, error: true };
+      try {
+        while (Date.now() - start < 20000) {
+          const pending = (Array.from(root.querySelectorAll(".dsh-mmd, .dsh-plantuml-block")) as any[])
+            .filter((element) => settledStates[element.getAttribute("data-state")] !== true);
+          const images = (Array.from(root.querySelectorAll("img")) as any[]).filter((image) => image.complete !== true);
+          if (pending.length === 0 && images.length === 0 && Date.now() - quietSince >= 450) return true;
+          await sleepMs(120);
+        }
+      } finally {
+        if (observer !== null) observer.disconnect();
+      }
+      return false;
+    }
+
+    /** Make `url(...)` references inside a stylesheet absolute. Inlined CSS
+        loses its stylesheet base URL, and the bundled @font-face files are
+        relative (`./fonts/*.woff2`), which would otherwise resolve against the
+        print document instead of the app. */
+    function absolutizeCssUrls(css, base) {
+      return String(css).replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (match, quote, reference) => {
+        if (reference === "" || /^(?:data:|blob:|https?:|file:|#|\/)/i.test(reference)) return match;
+        try {
+          return 'url("' + new URL(reference, base).href + '")';
+        } catch {
+          return match;
+        }
+      });
+    }
+
+    /** Serialize one live stylesheet that the snapshot can read. */
+    function stylesheetText(sheet) {
+      let rules = null;
+      try { rules = sheet.cssRules; } catch { rules = null; }
+      if (rules === null || rules === undefined) return null;
+      const base = sheet.href || document.baseURI;
+      let text = "";
+      for (let index = 0; index < rules.length; index += 1) {
+        let ruleText = "";
+        try { ruleText = rules[index].cssText || ""; } catch { ruleText = ""; }
+        if (ruleText === "") continue;
+        text += absolutizeCssUrls(ruleText, base) + "\n";
+      }
+      return text;
+    }
+
+    /** Every stylesheet on the page, in document order, as one CSS text. */
+    function collectPrintStyles() {
+      const sheets = [];
+      try { for (const sheet of Array.from(document.styleSheets)) sheets.push(sheet); } catch {}
+      try {
+        const adopted = document.adoptedStyleSheets || [];
+        for (const sheet of Array.from(adopted)) sheets.push(sheet);
+      } catch {}
+      const parts = [];
+      for (const sheet of sheets) {
+        if (sheet === null || sheet === undefined || sheet.disabled === true) continue;
+        const text = stylesheetText(sheet);
+        if (text !== null && text.trim() !== "") parts.push(text);
+      }
+      return parts.join("\n");
+    }
+
+    function escapeHtmlText(value) {
+      return String(value)
+        .split("&").join("&amp;")
+        .split("<").join("&lt;")
+        .split(">").join("&gt;");
+    }
+
+    function escapeHtmlAttribute(value) {
+      return escapeHtmlText(value).split('"').join("&quot;");
+    }
+
+    /** The page's own attributes worth carrying over: theme flags (`data-*`),
+        language, and the inline style that holds theme/font CSS variables. */
+    function copyableAttributes(element, includeStyle) {
+      let text = "";
+      if (element === null || element === undefined || element.attributes === undefined) return text;
+      for (const attribute of Array.from(element.attributes) as any[]) {
+        const name = attribute.name;
+        const keep = name === "class" || name === "lang" || name.indexOf("data-") === 0
+          || (includeStyle === true && name === "style");
+        if (!keep) continue;
+        text += " " + name + '="' + escapeHtmlAttribute(attribute.value) + '"';
+      }
+      return text;
+    }
+
+    /** First ancestor background that is actually painted. */
+    function effectiveBackgroundColor(element, fallback) {
+      let node = element;
+      while (node !== null && node !== undefined && node.nodeType === 1) {
+        let background = "";
+        try { background = window.getComputedStyle(node).backgroundColor || ""; } catch {}
+        if (background !== "" && background !== "transparent" && !/rgba\([^)]*,\s*0\s*\)/.test(background)) {
+          return background;
+        }
+        node = node.parentElement;
+      }
+      return fallback;
+    }
+
+    function currentColorScheme() {
+      try {
+        const scheme = String(window.getComputedStyle(document.documentElement).colorScheme || "").trim();
+        if (scheme !== "") return scheme;
+        if (document.body !== null && document.body.hasAttribute("data-ds-dark-theme")) return "dark";
+      } catch {}
+      return "light";
+    }
+
+    /** Mark live scroll containers in the clone so wide tables / long code
+        lines wrap on paper instead of being clipped at the scroll edge. The
+        two subtrees are structurally identical here, so element order lines up;
+        this runs before any node is removed from the clone. */
+    function relaxPrintScrollers(liveRoot, clone) {
+      try {
+        const liveNodes = [liveRoot].concat(Array.from(liveRoot.querySelectorAll("*")));
+        const cloneNodes = [clone].concat(Array.from(clone.querySelectorAll("*")));
+        const count = Math.min(liveNodes.length, cloneNodes.length);
+        for (let index = 0; index < count; index += 1) {
+          const liveNode = liveNodes[index];
+          const cloneNode = cloneNodes[index];
+          if (liveNode === null || cloneNode === null) continue;
+          if (liveNode.nodeType !== 1 || cloneNode.nodeType !== 1) continue;
+          if (liveNode.nodeName !== cloneNode.nodeName) continue;
+          let style = null;
+          try { style = window.getComputedStyle(liveNode); } catch {}
+          if (style === null) continue;
+          const overflow = String(style.overflowX) + " " + String(style.overflowY);
+          if (/(auto|scroll|overlay)/.test(overflow)) cloneNode.classList.add("dsp-print-relax");
+        }
+      } catch {}
+    }
+
+    /** Build the standalone print document from the live preview body. */
+    function buildPrintDocument(root, title) {
+      const clone = root.cloneNode(true);
+      relaxPrintScrollers(root, clone);
+      for (const node of Array.from(clone.querySelectorAll("button, [role='button'], input, select, textarea, [contenteditable]")) as any[]) {
+        node.remove();
+      }
+      // Markdown images are rendered lazily in the pane; the print document has
+      // no scrollport to trigger that, so every image must load eagerly.
+      for (const image of Array.from(clone.querySelectorAll("img")) as any[]) {
+        image.removeAttribute("loading");
+      }
+      const background = effectiveBackgroundColor(document.body, "#ffffff");
+      let foreground = "#1f2328";
+      try {
+        const color = window.getComputedStyle(document.body).color;
+        if (typeof color === "string" && color !== "") foreground = color;
+      } catch {}
+      const printCss = PDF_PRINT_CSS
+        .split("__DSP_BODY_BG__").join(background)
+        .split("__DSP_BODY_FG__").join(foreground);
+      const head = [
+        '<meta charset="utf-8">',
+        "<title>" + escapeHtmlText(title) + "</title>",
+        '<base href="' + escapeHtmlAttribute(document.baseURI) + '">',
+        '<meta name="color-scheme" content="' + escapeHtmlAttribute(currentColorScheme()) + '">',
+        "<style>" + collectPrintStyles() + "</style>",
+        "<style>" + printCss + "</style>",
+      ];
+      const htmlAttributes = copyableAttributes(document.documentElement, true);
+      const bodyAttributes = copyableAttributes(document.body, true);
+      return "<!doctype html><html" + htmlAttributes + "><head>" + head.join("") + "</head>"
+        + "<body" + bodyAttributes + '><div data-dsp-print-content="">'
+        + clone.outerHTML + "</div></body></html>";
+    }
+
+    /** Wait for the snapshot's fonts and images before the print snapshot is
+        taken, so text never lands in its fallback font and no image is blank. */
+    async function waitForPrintFrameReady(documentRef) {
+      try {
+        const fonts = documentRef.fonts;
+        if (fonts !== null && fonts !== undefined && fonts.ready !== undefined) await fonts.ready;
+      } catch {}
+      let images = [];
+      try { images = Array.from(documentRef.images || []); } catch {}
+      await Promise.all(images.map((image) => new Promise<void>((resolve) => {
+        if (image.complete === true) { resolve(); return; }
+        let done = false;
+        const finish = () => { if (done) return; done = true; resolve(); };
+        image.addEventListener("load", finish, { once: true });
+        image.addEventListener("error", finish, { once: true });
+        setTimeout(finish, 4000);
+      })));
+      await sleepMs(80);
+    }
+
+    /** Print a standalone document from an invisible same-origin frame. The
+        frame stays mounted until the print dialog closes (afterprint) — the
+        browser's preview reads from the live frame. */
+    function printStandaloneDocument(html) {
+      return new Promise<void>((resolve, reject) => {
+        let frame = null;
+        let cleaned = false;
+        const cleanup = () => {
+          if (cleaned) return;
+          cleaned = true;
+          try { if (frame !== null) frame.remove(); } catch {}
+        };
+        try {
+          const iframe = document.createElement("iframe");
+          iframe.setAttribute("aria-hidden", "true");
+          iframe.setAttribute("data-dsp-print-frame", "");
+          iframe.setAttribute("tabindex", "-1");
+          iframe.style.cssText = "position:fixed;right:0;bottom:0;width:1024px;height:768px;border:0;margin:0;padding:0;opacity:0;pointer-events:none;z-index:-1;";
+          iframe.addEventListener("load", () => {
+            const win = iframe.contentWindow;
+            const doc = iframe.contentDocument;
+            if (win === null || win === undefined || doc === null || doc === undefined) {
+              cleanup();
+              reject(new Error("print frame unavailable"));
+              return;
+            }
+            void (async () => {
+              await waitForPrintFrameReady(doc);
+              const previousFocus = document.activeElement as any;
+              try { win.focus(); } catch {}
+              try {
+                win.addEventListener("afterprint", cleanup);
+                win.addEventListener("pagehide", cleanup);
+                setTimeout(cleanup, 180000);
+                win.print();
+              } catch (error) {
+                cleanup();
+                reject(error);
+                return;
+              }
+              if (previousFocus !== null && previousFocus !== undefined && typeof previousFocus.focus === "function") {
+                try { previousFocus.focus({ preventScroll: true }); } catch {}
+              }
+              resolve();
+            })();
+          }, { once: true });
+          frame = iframe;
+          iframe.srcdoc = html;
+          document.body.appendChild(iframe);
+        } catch (error) {
+          cleanup();
+          reject(error);
+        }
+      });
+    }
+
+    /** Fallback for browsers that refuse to print an inline frame: hand the
+        same standalone document to a new window and print there. */
+    function openPrintWindow(html) {
+      try {
+        const win = window.open("", "_blank");
+        if (win === null || win === undefined) return false;
+        try {
+          win.document.open();
+          win.document.write(html);
+          win.document.close();
+        } catch {
+          return false;
+        }
+        win.setTimeout(() => {
+          try { win.focus(); win.print(); } catch {}
+        }, 500);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    /** Snapshot the preview body, then print it. */
+    async function exportMarkdownPreviewPdf(container, absolutePath) {
+      let root = null;
+      if (container !== null && container !== undefined && typeof container.querySelector === "function") {
+        try { root = container.querySelector("[data-document-markdown]"); } catch { root = null; }
+      }
+      if (root === null || root === undefined) root = visibleMarkdownRoot();
+      if (root === null || root === undefined) throw new Error(t("pdfExportNoPreview"));
+      let scope = container;
+      if (scope === null || scope === undefined) {
+        try { scope = root.closest("[data-textpreview-state]") || document.body; } catch { scope = document.body; }
+      }
+      const busyToast = showPdfExportToast(t("pdfExportBusy"));
+      try {
+        await loadEntirePreview(scope);
+        await waitForPreviewSettled(root);
+        const title = pdfExportFileName(absolutePath);
+        const html = buildPrintDocument(root, title);
+        try {
+          await printStandaloneDocument(html);
+        } catch (error) {
+          if (!openPrintWindow(html)) throw error;
+        }
+      } finally {
+        busyToast.dispose();
+      }
+    }
+
+    /** The preview-header "Export PDF" control. Rendered only for Markdown
+        files — other renderers have no Markdown body to print. */
+    function PdfExportAction(props) {
+      const [busy, setBusy] = React.useState(false);
+      const absolutePath = props !== null && props !== undefined ? props.absolutePath : undefined;
+      if (isMarkdownDocumentPath(absolutePath) !== true) return null;
+      const label = t("pdfExport");
+      const onClick = (event) => {
+        const button = event !== null && event !== undefined ? event.currentTarget : null;
+        if (pdfExportRunning || busy) return;
+        pdfExportRunning = true;
+        setBusy(true);
+        void (async () => {
+          try {
+            await exportMarkdownPreviewPdf(previewContainerOf(button), absolutePath);
+            showPdfExportToast(t("pdfExportHint"));
+          } catch (error) {
+            let detail = "unknown error";
+            if (error !== null && error !== undefined) {
+              detail = error.message !== undefined ? String(error.message) : String(error);
+            }
+            if (detail.length > 200) detail = detail.slice(0, 200);
+            showPdfExportToast(t("pdfExportFailed", { detail: detail }), "error");
+          } finally {
+            pdfExportRunning = false;
+            setBusy(false);
+          }
+        })();
+      };
+      return h(
+        "button",
+        {
+          type: "button",
+          className: "dsp-pdf-export",
+          "data-dsp-pdf-export": "",
+          title: t("pdfExportTitle"),
+          "aria-label": label,
+          "aria-busy": busy ? "true" : undefined,
+          disabled: busy,
+          onClick: onClick,
+        },
+        h(PrimIcon, { prim: "IconDownloadOutlineRegular", size: 15, "aria-hidden": "true" }),
+      );
+    }
+
+    /** Register the export action in the preview header. It is a list slot
+        owned by the stock preview plugin, so the contribution appears in the
+        stock UI (split view on or off) for every Markdown preview tab. */
+    function installPdfExportAction(slots) {
+      if (slots === null || slots === undefined || typeof slots.inject !== "function") return;
+      try {
+        slots.inject("sidebar.right.tab.document.actions", () => slots.register({
+          name: "sidebar.right.tab.document.actions",
+          id: PDF_EXPORT_ID,
+          order: 20,
+        }, PdfExportAction));
+      } catch (error) {
+        try { console.warn(LOG_PREFIX + " could not install the PDF export action:", String(error).slice(0, 160)); } catch {}
+      }
+    }
+
+    // ---------------------------------------------------------------------
     // plugin apply
     // ---------------------------------------------------------------------
 
@@ -10384,6 +10986,7 @@ window.__ModuleLoader__.load({
       }, "dsh-split-panels: IME composition tracker");
 
       ctx.effect(() => insertStyle(DSV_CSS), "dsh-split-panels: stylesheet");
+      ctx.effect(() => insertStyle(PDF_EXPORT_CSS, "pdf-export"), "dsh-split-panels: pdf export stylesheet");
 
       // Global chords (Alt+T, Alt+Shift+Arrows) ride the plugin's OWN
       // lifetime now: the old module-scope listeners stacked on every reload
@@ -10506,6 +11109,11 @@ window.__ModuleLoader__.load({
           h(SplitWorkspaceSeat, props),
         ),
       );
+
+      // Document-preview PDF export is independent of the split view: it
+      // contributes to the stock preview's header, so it must be installed
+      // even while the workspace overlay is inactive (zero or one pane).
+      installPdfExportAction(slots);
     }
 
     // dsh 0.1.5: client services (sessions/locale) are provided asynchronously
