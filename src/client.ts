@@ -1012,6 +1012,23 @@ window.__ModuleLoader__.load({
     }
     .dsv-pane-error-title { font-size: 13px; font-weight: 600; }
     .dsv-pane-error-body { font-size: 11px; color: var(--dsw-alias-label-tertiary); max-width: 90%; overflow-wrap: anywhere; }
+
+    /* ---- stock ask-user-question card compatibility --------------------
+       DSH caps the question card with max-height:min(60vh,520px) +
+       overflow:hidden, but pins its header (the question text) at
+       flex-shrink:0. A long question — and inside a narrow pane every
+       question wraps taller — therefore pushes the body and footer out of
+       the card box, so the bottom "skip/submit" row is clipped and the user
+       cannot answer. Letting the header shrink and scroll keeps the footer
+       inside the card at any pane or window height; short questions render
+       unchanged. The selector keys on the stock class-module suffixes
+       (_card/_header) so it survives DSH's per-build hash prefix. */
+    section[class*="_card"] > header[class*="_header"] {
+      flex-shrink: 1;
+      min-height: 0;
+      overflow-y: auto;
+    }
+
     @media (prefers-reduced-motion: reduce) {
       .dsv-drop-ghost { transition: none; }
     }
