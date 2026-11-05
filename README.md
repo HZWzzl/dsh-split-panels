@@ -55,7 +55,8 @@ flowchart TD
 ```
 
 - **启动即分屏**：打开页面时，当前有历史的会话直接作为 1 个 pane 出现；不再有「原生单会话 ↔ 分屏」两套界面。
-- **新建会话秒开**：点 New Session（stock 为会话新建绑定了 Mod+N 时快捷键同样生效）立刻在右侧出现一栏「新会话」，输入框马上可以打字，不再阻塞等 Host 建好会话；Host 返回真实会话后该栏原地切换成正式会话，未发送的文字自动带入（回车则作为首条消息排队发送）。Host 创建失败/超时会显示重试与关闭。诊断见 `health().pendingNewSessions` / `health().lastNewSessionResolve`。
+- **回车换行，Ctrl+回车发送**：所有输入框里回车默认换行，不再误发；发送用 Ctrl+回车（macOS 为 ⌘+回车）或点发送按钮。分屏外的原生单栏输入框同样生效；斜杠/引用菜单打开且有高亮项时，回车仍用于选中该项；排队消息的「Ctrl+回车插话发送」仅在草稿为空时保留（与原生提示一致）。原生「快捷键」设置页里仍写着 Enter=发送，那段文案属于 DSH 本体，实际行为以本插件为准。
+- **新建会话秒开**：点 New Session（stock 为会话新建绑定了 Mod+N 时快捷键同样生效）立刻在右侧出现一栏「新会话」，输入框马上可以打字，不再阻塞等 Host 建好会话；Host 返回真实会话后该栏原地切换成正式会话，未发送的文字自动带入（Ctrl+回车则作为首条消息排队发送）。Host 创建失败/超时会显示重试与关闭。诊断见 `health().pendingNewSessions` / `health().lastNewSessionResolve`。
 - **1–3 栏**：单栏占满正文宽度；第 4 栏会被拒绝。拆分布局记忆在 `localStorage`，刷新后恢复。
 - **最后一栏不可关闭**：✕ 只在两栏及以上出现；关闭最后一栏会退回原生单会话视图，与“正文区始终是 1–3 个 pane”的模型冲突，因此不提供。退出分屏用 `window.__dshSplitPanels.setEnabled(false)`（或 `dsh-session-hotkeys` 的 Alt+W）。
 - **状态条保留**：每栏顶部渲染原生 session header 的状态入口（Agent Team、Standard mode、子代理、后台任务、定时任务、⋯ 更多操作），与原生页同一套组件、同一套交互。
