@@ -139,12 +139,16 @@ window.__ModuleLoader__.load({
         widens a row past it: it fills the last row, then starts a new row
         below. */
     const PANE_COLUMNS = 3;
-    /** Maximum pane rows stacked vertically: 3 rows = 9 panes (3×3), 2 rows =
-        6 panes (3×2). Chosen from the measured cost per live pane (see
-        README「性能与规模」): every pane re-hosts a full native
-        ChatView + composer on the same main thread, so the cap bounds both
-        heap and streaming re-render fan-out. */
-    const MAX_PANE_ROWS = 3;
+    /** Maximum pane rows stacked vertically: 2 rows = 6 panes (3×2). The cap
+        is a RESPONSIVENESS bound, not just a space bound: every pane re-hosts
+        a full native ChatView + composer on the same main thread, and the
+        expensive step is adding a pane next to already-long transcripts (the
+        row re-layouts every message it holds). Measured on the reference
+        machine: adding the 6th pane freezes the main thread ~0.5-1.2s, adding
+        the 7th (a row-height change that also flips every composer to the
+        compact line) is notably worse, so the grid stops at two rows. See
+        README「性能与规模」. */
+    const MAX_PANE_ROWS = 2;
     /** Hard cap on pane leaves: persisted trees and runtime appends alike. */
     const MAX_PANES = PANE_COLUMNS * MAX_PANE_ROWS;
     // ---- 1.6.0 safety-layer limits (documented in README) ------------------
@@ -476,6 +480,28 @@ window.__ModuleLoader__.load({
       background: var(--dsw-alias-bg-base);
     }
     .dsv-pane.bare { background: transparent; }
+    /* First-paint placeholder for a pane whose conversation body has not been
+       mounted yet (see PaneFrame's bodyReady): the chrome and slot geometry are
+       already correct, only the heavy native subtree is still pending. */
+    .dsv-pane-body-pending { flex: 1; min-height: 0; }
+    /* ---- transcript rows: skip off-screen layout / paint ----------------
+       Every pane re-hosts a full native transcript. Resizing the grid (the
+       2 → 3 column step when a pane is added, or a divider drag) otherwise
+       re-lays out EVERY message the neighbouring panes hold; with long
+       conversations that was the ~1s freeze when adding the 6th pane.
+       content-visibility: auto keeps rows outside the pane's viewport out of
+       layout and paint entirely, so a resize only pays for the visible slice.
+       contain-intrinsic-size: auto reuses the size a row had when it was last
+       rendered, which keeps the scrollbar and the "follow latest" position
+       stable after the first paint; rows render again as they scroll into
+       view. Selectors: the native transcript column (data-chat-flow attribute)
+       and this plugin's fallback transcript column (dsv-chat-column class).
+       (No backticks in this comment — it lives inside a template literal.) */
+    .dsv-pane [data-chat-flow] > *,
+    .dsv-pane .dsv-chat-column > * {
+      content-visibility: auto;
+      contain-intrinsic-size: auto 96px;
+    }
     .dsv-body.flush { padding: 0; gap: 0; }
     .dsv-pane-header {
       flex: none; height: 28px; display: flex; align-items: center; gap: 6px;
@@ -5816,6 +5842,20 @@ window.__ModuleLoader__.load({
       return best;
     }
 
+    /** Transcript updates cannot change the composer's horizontal geometry.
+        Ignore them before scheduling layout reads, but keep structural changes
+        outside the flow (including a replaced composer) observable. */
+    function hasComposerGeometryMutation(records) {
+      for (const record of records) {
+        const target = record.target;
+        const element = target !== null && target !== undefined && target.nodeType === 1
+          ? target : target?.parentElement;
+        if (element === null || element === undefined || typeof element.closest !== "function"
+            || element.closest("[data-chat-flow], .dsv-chat-column") === null) return true;
+      }
+      return false;
+    }
+
     /** Pin a row's left edge and width to the LIVE composer box, measured
         relative to the row's OWN wrapper — the footer/dock containers have
         their own offset, so pane-relative coordinates land shifted.
@@ -5879,7 +5919,9 @@ window.__ModuleLoader__.load({
         observer.observe(pane);
         let mutation = null;
         if (typeof MutationObserver === "function") {
-          mutation = new MutationObserver(schedule);
+          mutation = new MutationObserver((records) => {
+            if (hasComposerGeometryMutation(records)) schedule();
+          });
           mutation.observe(pane, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-composer-card", "data-dsv-composer-card"] });
         }
         raf = requestAnimationFrame(tick);
@@ -7237,6 +7279,24 @@ window.__ModuleLoader__.load({
       }, []);
       const narrow = paneSize.w > 0 && paneSize.w < 560;
       const shortPane = paneSize.h === 0 ? false : shortRef.current;
+      // Paint the pane chrome and its slot FIRST, then mount the heavy native
+      // conversation body one paint later. Adding a pane is the slowest
+      // interaction in the grid (the new pane's whole transcript + composer,
+      // plus the neighbouring panes reflowing); deferring the body means the
+      // new pane is visibly there on the next frame, so a click never feels
+      // dropped, while the expensive mount runs in the following task.
+      const [bodyReady, setBodyReady] = React.useState(false);
+      React.useEffect(() => {
+        if (bodyReady) return undefined;
+        let second = 0;
+        const first = window.requestAnimationFrame(() => {
+          second = window.requestAnimationFrame(() => setBodyReady(true));
+        });
+        return () => {
+          window.cancelAnimationFrame(first);
+          if (second !== 0) window.cancelAnimationFrame(second);
+        };
+      }, [bodyReady]);
       // explicit mode lives in the module store so the Alt+T chord can
       // toggle the focused pane from the window keydown path; subscribing
       // re-renders this pane only when some pane's mode changes
@@ -7274,16 +7334,11 @@ window.__ModuleLoader__.load({
         // on every token batch for nothing.
         if (composerMode === "tui") return;
         let raf = 0;
+        let measureTimer = 0;
         let lastMeasureAt = 0;
         const measure = () => {
-          // Visibility + rate gates FIRST: this observer fires on every React
-          // commit while a pane streams. A hidden window has nothing to measure,
-          // and passes are capped to ~12/s per pane so a streaming burst cannot
-          // turn layout reads into per-commit work (S4).
           if (typeof document.visibilityState === "string" && document.visibilityState === "hidden") return;
-          const now = Date.now();
-          if (now - lastMeasureAt < 80) return;
-          lastMeasureAt = now;
+          lastMeasureAt = Date.now();
           // Cheap gate FIRST: no composer card markers in the frame at all
           // (takeover cards, transient unmounts) → nothing to re-mark or
           // measure, and no forced layout below. This observer fires on every
@@ -7314,7 +7369,7 @@ window.__ModuleLoader__.load({
           // page's card, because that one comes first in document order — that
           // is a core-side defect this plugin cannot fix from here.
           for (const node of frame.querySelectorAll("[data-composer-card]")) {
-            node.setAttribute("data-dsv-composer-card", "");
+            if (!node.hasAttribute("data-dsv-composer-card")) node.setAttribute("data-dsv-composer-card", "");
           }
           // ONE geometry source: the real full-mode card (must contain the
           // live editor). dsh 0.1.5 renders that editor as a Lexical
@@ -7389,17 +7444,28 @@ window.__ModuleLoader__.load({
           setCardBox((prev) => (prev !== null && prev.left === left && prev.right === right && prev.bottomDist === bottomDist ? prev : { left, right, rightDist, bottomDist }));
         };
         const schedule = () => {
-          if (raf === 0) raf = requestAnimationFrame(() => { raf = 0; measure(); });
+          if (document.visibilityState === "hidden" || raf !== 0 || measureTimer !== 0) return;
+          const delay = Math.max(0, 80 - (Date.now() - lastMeasureAt));
+          if (delay > 0) {
+            measureTimer = window.setTimeout(() => { measureTimer = 0; schedule(); }, delay);
+          } else {
+            raf = requestAnimationFrame(() => { raf = 0; measure(); });
+          }
         };
         const observer = new ResizeObserver(schedule);
         observer.observe(frame);
-        const mutation = typeof MutationObserver === "function" ? new MutationObserver(schedule) : null;
+        const mutation = typeof MutationObserver === "function" ? new MutationObserver((records) => {
+          if (hasComposerGeometryMutation(records)) schedule();
+        }) : null;
         if (mutation !== null) mutation.observe(frame, { childList: true, subtree: true });
+        document.addEventListener("visibilitychange", schedule);
         schedule();
         return () => {
           if (raf !== 0) cancelAnimationFrame(raf);
+          if (measureTimer !== 0) window.clearTimeout(measureTimer);
           observer.disconnect();
           if (mutation !== null) mutation.disconnect();
+          document.removeEventListener("visibilitychange", schedule);
         };
       }, [paneSize.w, composerMode]);
       // a composer is never narrower than this — narrower "boxes" are
@@ -7708,7 +7774,7 @@ window.__ModuleLoader__.load({
           running ? h("span", { className: "dsv-pane-running", title: t("running") }) : null,
           h("span", { className: "dsv-pane-title" }, title),
           // The last pane has no close affordance: the workspace always shows
-          // one of 1-9 panes, and closing the only one would reveal the stock view.
+          // one of 1-6 panes, and closing the only one would reveal the stock view.
           closable === false ? null : h("button", {
             type: "button",
             className: "dsv-pane-btn dsv-pane-close",
@@ -7771,7 +7837,9 @@ window.__ModuleLoader__.load({
             }, t("paneColorReset")),
           ),
         ) : null,
-        h(ChatPane, { sessionId, session, narrow, summary, composerMode, onToggleComposerMode: toggleComposerMode, toggleNode: composerMode === "tui" ? modeBtnNode : null }),
+        bodyReady
+          ? h(ChatPane, { sessionId, session, narrow, summary, composerMode, onToggleComposerMode: toggleComposerMode, toggleNode: composerMode === "tui" ? modeBtnNode : null })
+          : h("div", { className: "dsv-pane-body-pending", "aria-hidden": true }),
         zone !== null
           ? h("div", { className: "dsv-drop-ghost", style: ghostStyle(zone) }, h("span", { className: "dsv-drop-label" }, t(zone.label)))
           : null,
@@ -7964,6 +8032,22 @@ window.__ModuleLoader__.load({
     function Divider({ dir, node, index }) {
       const [active, setActive] = React.useState(false);
       const dragRef = React.useRef(null);
+      // Pointer events can arrive at >100/s. Each setSizes is a tree commit plus
+      // a re-render/reflow of the two panes being resized, so coalesce them to
+      // one update per animation frame; the final position is flushed on
+      // pointer-up so the persisted layout is exact.
+      const pendingSizes = React.useRef(null);
+      const sizeRaf = React.useRef(0);
+      const flushSizes = () => {
+        const sizes = pendingSizes.current;
+        pendingSizes.current = null;
+        if (sizes !== null) treeStore.setSizes(node.sid, sizes);
+      };
+      React.useEffect(() => () => {
+        if (sizeRaf.current !== 0) window.cancelAnimationFrame(sizeRaf.current);
+        sizeRaf.current = 0;
+        pendingSizes.current = null;
+      }, []);
       const onPointerDown = (event) => {
         event.preventDefault();
         const parent = event.currentTarget.parentElement;
@@ -7997,11 +8081,22 @@ window.__ModuleLoader__.load({
         const pair = ratios[a] + ratios[b];
         ratios[a] = Math.min(pair - drag.min, Math.max(drag.min, drag.ratios[a] + delta / drag.total));
         ratios[b] = pair - ratios[a];
-        treeStore.setSizes(node.sid, ratios);
+        pendingSizes.current = ratios;
+        if (sizeRaf.current === 0) {
+          sizeRaf.current = window.requestAnimationFrame(() => {
+            sizeRaf.current = 0;
+            flushSizes();
+          });
+        }
       };
       const finish = (event) => {
         if (dragRef.current === null || dragRef.current.pointerId !== event.pointerId) return;
         dragRef.current = null;
+        if (sizeRaf.current !== 0) {
+          window.cancelAnimationFrame(sizeRaf.current);
+          sizeRaf.current = 0;
+        }
+        flushSizes();
         setActive(false);
         treeStore.persistNow();
         if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
