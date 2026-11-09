@@ -1,6 +1,6 @@
 {
   "name": "dsh-split-panels",
-  "version": "2026.10.22-1",
+  "version": "2026.11.09-1",
   "private": false,
   "description": "DSH Web 增强插件：对话区 3 列网格分屏（最多 9 栏，纵向追加）+ 右侧文档预览导出 PDF。",
   "type": "module",
